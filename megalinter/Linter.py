@@ -32,7 +32,7 @@ import urllib.request
 from time import perf_counter
 
 import yaml
-from megalinter import config, pre_post_factory, utils, utils_reporter
+from megalinter import config, pre_post_factory, utils, utils_sarif, utils_reporter
 from megalinter.constants import DEFAULT_DOCKER_WORKSPACE_DIR
 
 
@@ -899,6 +899,10 @@ class Linter:
             and os.path.isfile(self.sarif_output_file)
         ):
             sarif_confirmed = True
+        
+        if sarif_confirmed is True:
+            utils_sarif.normalize_sarif_files(self)
+
         # Convert SARIF into human readable text for Console & Text reporters
         if sarif_confirmed is True and self.master.sarif_to_human is True:
             with open(self.sarif_output_file, "r", encoding="utf-8") as file:

@@ -2,6 +2,10 @@ import random
 import os
 import json
 import logging
+import re
+from tempfile import mkstemp
+from shutil import move
+from os import fdopen, remove
 
 from json.decoder import JSONDecodeError
 from megalinter.utils_reporter import get_linter_doc_url
@@ -12,8 +16,10 @@ def normalize_sarif_files(linter: Linter):
 
     if linter.sarif_output_file is not None and os.path.isfile(
         linter.sarif_output_file
-    ):
+    ) and os.path.getsize(linter.sarif_output_file) > 0:
         # Read SARIF output file
+        
+
         load_ok = False
         with open(
             linter.sarif_output_file, "r", encoding="utf-8"
@@ -40,20 +46,53 @@ def normalize_sarif_files(linter: Linter):
                 )
                 logging.error(str(e))
         if load_ok is True:
-            # fix sarif file
             linter_sarif_obj = fix_sarif(linter_sarif_obj, linter)
         
-        result_json = json.dumps(linter_sarif_obj, sort_keys=True, indent=4)
-        fixed_sarif_target_file=linter.sarif_output_file + ".fixed.sarif"
-        with open(fixed_sarif_target_file, "w", encoding="utf-8") as sarif_file:
-            sarif_file.write(result_json)
-            logging.info(
-                f"[SARIF Reporter] Generated {linter.name} report: {fixed_sarif_target_file}"
-            )
+            result_json = json.dumps(linter_sarif_obj, sort_keys=True, indent=2)
+            
+            with open(linter.sarif_output_file, "w", encoding="utf-8") as sarif_file:
+                sarif_file.write(result_json)
+                logging.info(
+                    f"[SARIF Reporter] Generated {linter.name} report: {linter.sarif_output_file}"
+                )
+            
+            
+            # In case SARIF is active, and default workspace is set, clear that from sarif files
+            if config.get("SARIF_REPORTER_NORMALIZE_LINTERS_OUTPUT", "") == "true":
+                clear_default_workspace_prefix(linter.sarif_output_file) 
+
+def clear_default_workspace_prefix(file_path):
+    
+    default_workspace = config.get("DEFAULT_WORKSPACE", "")
+    def_ws_pattern = "(?P<def_ws_context>\s+\"uri\"\:\s\")"  + default_workspace + '/'
+    def_ws_pattern2 = "(?P<def_ws_context>\s+\"uri\"\:\s\"file://)"  + default_workspace +  '/'
+    def_ws_pattern3 = "(?P<def_ws_context>\s+\")" + default_workspace + '/'
+    
+    patterns = [def_ws_pattern, def_ws_pattern2, def_ws_pattern3]
+    
+    #Create temp file
+    fh, abs_path = mkstemp()
+    with fdopen(fh,'w') as new_file:
+        with open(file_path) as old_file:
+            for line in old_file:
+                new_line=line
+                matched=False
+                for p in patterns:
+                    match=re.match(p,line)
+
+                    if match:
+                        matched=True
+                        replaced=re.sub(p, match.group('def_ws_context'), line)
+                        new_file.write(replaced)
+            
+                if not matched: 
+                    new_file.write(new_line)
+    move(abs_path, file_path)
 
 # Some SARIF linter output contain errors (like references to line 0)
 # We must correct them so SARIF is valid
-def fix_sarif(linter_sarif_obj, linter):
+def fix_sarif(linter_sarif_obj, linter: Linter):
+
     # browse runs
     if "runs" in linter_sarif_obj:
         for id_run, run in enumerate(linter_sarif_obj["runs"]):
@@ -134,6 +173,8 @@ def fix_sarif(linter_sarif_obj, linter):
                                     location["physicalLocation"]
                                 )
                             result["locations"][id_location] = location
+                        
+                            
                     run["results"][id_result] = result
             else:
                 # make sure that there is a results entry so GitHub's SARIF validator doesn't cry
@@ -143,23 +184,11 @@ def fix_sarif(linter_sarif_obj, linter):
             linter_sarif_obj["runs"][id_run] = run
     return linter_sarif_obj
 
-# If DEFAULT_WORKSPACE is set, don't add that to the SARIF-report prefix
-def fix_default_workspace_prefix(artifactLocation):
-    default_workspace = config.get("DEFAULT_WORKSPACE", "")
-    if default_workspace:
-        if artifactLocation["uri"].startswith(default_workspace):
-            artifactLocation["uri"] = artifactLocation["uri"].replace(
-                default_workspace, "", 1
-            )
-    return artifactLocation["uri"]
-
 # Replace startLine and endLine in region or contextRegion
 def fix_sarif_physical_location(physical_location):
 
     for location_key in physical_location.keys():
         location_item = physical_location[location_key]
-        if "uri" in location_item and location_key == "artifactLocation":
-            location_item["uri"] = fix_default_workspace_prefix(location_item)
         if "startLine" in location_item and location_item["startLine"] == 0:
             location_item["startLine"] = 1
         if "endLine" in location_item and location_item["endLine"] == 0:
